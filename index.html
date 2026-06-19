@@ -21,7 +21,7 @@ body {
   text-align: center;
 }
 h2 { font-size: 18px; color: #1a3a5c; margin-bottom: 8px; }
-p.sub { font-size: 12.5px; color: #8fa5be; margin-bottom: 24px; }
+p.sub { font-size: 12.5px; color: #8fa5be; margin-bottom: 24px; line-height: 1.6; }
 
 .mic-btn {
   width: 96px; height: 96px; border-radius: 50%;
@@ -47,6 +47,14 @@ p.sub { font-size: 12.5px; color: #8fa5be; margin-bottom: 24px; }
 }
 .status.active { color: #e05252; }
 
+/* リアルタイム認識中テキスト */
+.interim-text {
+  min-height: 36px;
+  font-size: 13px; color: #8fa5be;
+  font-style: italic; margin-bottom: 10px;
+  line-height: 1.6;
+}
+
 .transcript-box {
   width: 100%; min-height: 120px;
   border: 1.5px solid #dde4ed; border-radius: 10px;
@@ -59,30 +67,6 @@ p.sub { font-size: 12.5px; color: #8fa5be; margin-bottom: 24px; }
   border-color: #3ab8a0;
   box-shadow: 0 0 0 3px rgba(58,184,160,.12);
 }
-
-.transcribing-overlay {
-  display: none;
-  position: fixed; inset: 0;
-  background: rgba(26,58,92,.45);
-  align-items: center; justify-content: center;
-  z-index: 999;
-}
-.transcribing-overlay.show { display: flex; }
-.transcribing-box {
-  background: #fff; border-radius: 14px;
-  padding: 28px 36px; text-align: center;
-  box-shadow: 0 8px 32px rgba(26,58,92,.2);
-}
-.spinner {
-  width: 40px; height: 40px;
-  border: 4px solid #dde4ed;
-  border-top-color: #3ab8a0;
-  border-radius: 50%;
-  animation: spin .8s linear infinite;
-  margin: 0 auto 14px;
-}
-@keyframes spin { to { transform: rotate(360deg); } }
-.transcribing-box p { font-size: 13.5px; color: #4a6180; font-weight: 600; }
 
 .btn-row { display: flex; gap: 10px; justify-content: center; }
 .btn {
@@ -100,55 +84,70 @@ p.sub { font-size: 12.5px; color: #8fa5be; margin-bottom: 24px; }
   display: none; color: #e05252; font-size: 13px;
   background: #fff0f0; border-radius: 8px;
   padding: 10px 14px; margin-bottom: 14px;
-  text-align: left; line-height: 1.6;
-  white-space: pre-wrap;
+  text-align: left; line-height: 1.6; white-space: pre-wrap;
 }
 .error-msg.show { display: block; }
+
+.badge-safari {
+  display: inline-block; margin-top: 16px;
+  padding: 4px 12px; border-radius: 20px;
+  background: #fff4e0; color: #f0a030;
+  font-size: 11px; font-weight: 600;
+}
 </style>
 </head>
 <body>
-
-<div class="transcribing-overlay" id="transcribingOverlay">
-  <div class="transcribing-box">
-    <div class="spinner"></div>
-    <p>Gemini が書き起こし中...</p>
-  </div>
-</div>
-
 <div class="card">
   <h2>🎙️ 音声入力</h2>
-  <p class="sub">マイクボタンを押して話してください</p>
+  <p class="sub">ボタンを押して話してください<br>話し終わったらもう一度押して停止</p>
 
   <button class="mic-btn" id="micBtn" onclick="toggleRecording()">🎙️</button>
   <div class="status" id="status">タップして録音開始</div>
+  <div class="interim-text" id="interimText"></div>
   <div class="error-msg" id="errorMsg"></div>
 
   <textarea class="transcript-box" id="transcript"
-    placeholder="ここに書き起こされたテキストが入ります..."></textarea>
+    placeholder="ここに音声が文字起こしされます..."></textarea>
 
   <div class="btn-row">
     <button class="btn btn-clear" onclick="clearText()">クリア</button>
     <button class="btn btn-primary" id="sendBtn"
       onclick="sendToParent()" disabled>✅ この内容で確定</button>
   </div>
+
+  <div id="safariWarning" style="display:none">
+    <span class="badge-safari">⚠️ SafariはWeb Speech API非対応です。Chromeをお使いください。</span>
+  </div>
 </div>
 
 <script>
 // ============================================================
-//  cocoromi 音声入力ページ（GitHub Pages ホスト版）
-//
-//  ① MediaRecorder で録音
-//  ② base64 に変換して GAS の transcribeAudio() に送信
-//  ③ Gemini が書き起こした結果を postMessage で親ウィンドウ（GAS）に返す
-//
-//  ▼ GAS_ENDPOINT を日報システムのデプロイURLに変更してください ▼
+//  cocoromi 音声入力ページ（GitHub Pages / Web Speech API版）
+//  Chrome PC・Chrome Android 対応
+//  Safari は非対応（警告表示のみ）
 // ============================================================
 
-const GAS_ENDPOINT = 'https://script.google.com/a/macros/cocoromi-cl.jp/s/AKfycbyiQRj3a4XSI1-7YW25HG4lPWUok8bp8v9L_jXePfPc72ObKHpzb2YlRvPUOhsLudb0/exec';
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-let mediaRecorder = null;
-let audioChunks   = [];
-let isRecording   = false;
+// Safari判定
+const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
+let recognition  = null;
+let isRecording  = false;
+let finalText    = '';
+
+window.addEventListener('load', () => {
+  if (!SpeechRecognition) {
+    document.getElementById('safariWarning').style.display = 'block';
+    document.getElementById('micBtn').disabled = true;
+    document.getElementById('micBtn').style.opacity = '0.4';
+    showError('このブラウザは音声入力に対応していません。\nChromeをお使いください。');
+    return;
+  }
+  if (isSafari) {
+    document.getElementById('safariWarning').style.display = 'block';
+  }
+});
 
 function toggleRecording() {
   if (isRecording) stopRecording();
@@ -156,99 +155,68 @@ function toggleRecording() {
 }
 
 function startRecording() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showError('このブラウザは録音に対応していません。\nChromeまたはSafariをお使いください。');
-    return;
-  }
+  if (!SpeechRecognition) return;
 
-  navigator.mediaDevices.getUserMedia({ audio: true })
-    .then(stream => {
-      audioChunks = [];
+  finalText = document.getElementById('transcript').value;
 
-      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : MediaRecorder.isTypeSupported('audio/webm')
-          ? 'audio/webm'
-          : 'audio/mp4';
+  recognition = new SpeechRecognition();
+  recognition.lang = 'ja-JP';
+  recognition.continuous = true;
+  recognition.interimResults = true;
 
-      mediaRecorder = new MediaRecorder(stream, { mimeType });
+  recognition.onstart = () => {
+    isRecording = true;
+    document.getElementById('micBtn').classList.add('recording');
+    document.getElementById('micBtn').textContent = '⏹️';
+    document.getElementById('status').classList.add('active');
+    setStatus('🔴 録音中... もう一度押すと停止');
+    hideError();
+  };
 
-      mediaRecorder.ondataavailable = e => {
-        if (e.data.size > 0) audioChunks.push(e.data);
-      };
-
-      mediaRecorder.onstop = () => {
-        stream.getTracks().forEach(t => t.stop());
-        isRecording = false;
-        resetMicBtn();
-
-        if (audioChunks.length === 0) {
-          setStatus('録音データがありません。もう一度お試しください。');
-          return;
-        }
-
-        const blob      = new Blob(audioChunks, { type: mimeType });
-        const cleanMime = mimeType.split(';')[0];
-
-        showTranscribing(true);
-
-        // base64変換
-        const reader = new FileReader();
-        reader.onloadend = () => {
-          const base64 = reader.result.split(',')[1];
-
-          // GASのtranscribeAudio()をfetch経由で呼び出す
-          fetch(GAS_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'transcribeAudio',
-              base64Audio: base64,
-              mimeType: cleanMime
-            }),
-            redirect: 'follow'
-          })
-          .then(r => r.json())
-          .then(res => {
-            showTranscribing(false);
-            if (!res.ok) {
-              showError('書き起こしエラー:\n' + res.error);
-              return;
-            }
-            document.getElementById('transcript').value = res.text;
-            document.getElementById('sendBtn').disabled = false;
-            setStatus('✅ 書き起こし完了。内容を確認して「確定」を押してください');
-          })
-          .catch(err => {
-            showTranscribing(false);
-            showError('通信エラー:\n' + err.message);
-          });
-        };
-        reader.readAsDataURL(blob);
-      };
-
-      mediaRecorder.start();
-      isRecording = true;
-
-      document.getElementById('micBtn').classList.add('recording');
-      document.getElementById('micBtn').textContent = '⏹️';
-      document.getElementById('status').classList.add('active');
-      setStatus('🔴 録音中... もう一度押すと停止');
-      hideError();
-    })
-    .catch(err => {
-      if (err.name === 'NotAllowedError') {
-        showError('マイクへのアクセスが拒否されました。\nアドレスバー横のマイクアイコンから許可してください。');
+  recognition.onresult = e => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) {
+        finalText += e.results[i][0].transcript;
       } else {
-        showError('マイク取得エラー: ' + err.message);
+        interim += e.results[i][0].transcript;
       }
-    });
+    }
+    document.getElementById('transcript').value = finalText;
+    document.getElementById('interimText').textContent = interim ? '（認識中: ' + interim + '）' : '';
+    document.getElementById('sendBtn').disabled = !finalText.trim();
+  };
+
+  recognition.onerror = e => {
+    isRecording = false;
+    resetMicBtn();
+    if (e.error === 'not-allowed') {
+      showError('マイクへのアクセスが拒否されました。\nアドレスバー横のマイクアイコンから許可してください。');
+    } else if (e.error === 'no-speech') {
+      setStatus('音声が検出されませんでした。もう一度お試しください。');
+    } else {
+      showError('エラー: ' + e.error);
+    }
+  };
+
+  recognition.onend = () => {
+    isRecording = false;
+    resetMicBtn();
+    document.getElementById('interimText').textContent = '';
+    if (finalText.trim()) {
+      setStatus('✅ 完了。内容を確認して「確定」を押してください');
+      document.getElementById('sendBtn').disabled = false;
+    } else {
+      setStatus('タップして録音開始');
+    }
+  };
+
+  recognition.start();
 }
 
 function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    setStatus('⏳ 処理中...');
+  if (recognition) {
+    recognition.stop();
   }
 }
 
@@ -259,7 +227,9 @@ function resetMicBtn() {
 }
 
 function clearText() {
+  finalText = '';
   document.getElementById('transcript').value = '';
+  document.getElementById('interimText').textContent = '';
   document.getElementById('sendBtn').disabled = true;
   setStatus('タップして録音開始');
   hideError();
@@ -274,9 +244,6 @@ function sendToParent() {
   }
 }
 
-function showTranscribing(show) {
-  document.getElementById('transcribingOverlay').classList.toggle('show', show);
-}
 function setStatus(msg) {
   document.getElementById('status').textContent = msg;
 }
